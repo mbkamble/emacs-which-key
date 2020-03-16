@@ -40,6 +40,7 @@
 (require 'cl-lib)
 (require 'button)
 (require 'regexp-opt)
+(require 'seq)
 
 ;; For compiler
 (defvar evil-operator-shortcut-map)
@@ -2616,6 +2617,7 @@ is selected interactively by mode in `minor-mode-map-alist'."
     (&optional prefix-keys from-keymap filter prefix-title)
   "Fill `which-key--buffer' with key descriptions and reformat.
 Finally, show the buffer."
+  (which-key--debug-message "prefix=%s from_keymap=%s filter=%s prefix-title=%s" prefix-keys from-keymap filter prefix-title)
   (let ((start-time (current-time))
         (formatted-keys (which-key--get-bindings
                          prefix-keys from-keymap filter))
@@ -2635,30 +2637,46 @@ Finally, show the buffer."
      "On prefix \"%s\" which-key took %.0f ms." prefix-desc
      (* 1000 (float-time (time-since start-time))))))
 
+(defun which-key--lastn-seq (seq n)
+  (seq-reverse (seq-take (seq-reverse seq) n)))
+
 (defun which-key--this-command-keys ()
   "Version of `this-single-command-keys' corrected for key-chords and god-mode."
-  (let ((this-command-keys (this-single-command-keys)))
-    (when (and (equal this-command-keys [key-chord])
+  (let ((this-command-keys (this-single-command-keys))
+        (rkeys (recent-keys)))
+    ;; (which-key--debug-message "this-single-command-keys=%s recent-keys-last10=%s"
+    ;; 			      this-command-keys (which-key--lastn-seq rkeys 10))
+    (when (and (equal (seq-take this-command-keys 1) [key-chord])
                (bound-and-true-p key-chord-mode))
       (setq this-command-keys
             (condition-case nil
-                (let ((rkeys (recent-keys)))
-                  (vector 'key-chord
-                          ;; Take the two preceding the last one, because the
-                          ;; read-event call in key-chord seems to add a
-                          ;; spurious key press to this list. Note this is
-                          ;; different from guide-key's method which didn't work
-                          ;; for me.
-                          (aref rkeys (- (length rkeys) 3))
-                          (aref rkeys (- (length rkeys) 2))))
+                (let* (
+                       ;; recent-keys can be either
+                       ;; [... R1 R2 R2 key-chord T1 T2 ...] or
+                       ;; [... R1 R2 R2 T1 T2 ...],
+                       ;; but always this-single = [key-chord T1 T2 ...]
+                       ;; We need to return [key-chord R1 R2 T1 T2 ...]
+                       ;; so filter key-chord from both vectors and drop extra R2
+                       (rkeys-a (seq-filter (lambda (x)
+                                              (and (not (eq 'key-chord x))
+                                                   (numberp x))) rkeys))
+                       (tsck-len (seq-length (seq-drop this-command-keys 1)))
+                       (rkeys-b (which-key--lastn-seq rkeys-a (+ 3 tsck-len))))
+                  (seq-concatenate 'vector
+                                   [key-chord]
+                                   (seq-subseq rkeys-b 0 2)
+                                   (seq-subseq rkeys-b 3)) ;; drop 3rd elem
+                  )
               (error (progn
                        (message "which-key error in key-chord handling")
-                       [key-chord])))))
+                       [key-chord]))))
+      )
     (when (and which-key--god-mode-support-enabled
                (bound-and-true-p god-local-mode)
                (eq this-command 'god-mode-self-insert))
       (setq this-command-keys (when which-key--god-mode-key-string
-                          (kbd which-key--god-mode-key-string))))
+                                (kbd which-key--god-mode-key-string))))
+    ;; (which-key--debug-message "returning this-command-keys=%s" this-command-keys)
     this-command-keys))
 
 (defun which-key--update ()
@@ -2666,7 +2684,8 @@ Finally, show the buffer."
 `which-key--create-buffer-and-show'."
   (let ((prefix-keys (which-key--this-command-keys))
         delay-time)
-    (cond ((and (> (length prefix-keys) 0)
+    (which-key--debug-message "wk--update::prefix=%s curr-prefix=%s\n" prefix-keys (which-key--current-prefix))
+      (cond ((and (> (length prefix-keys) 0)
                 (or (keymapp (key-binding prefix-keys))
                     ;; Some keymaps are stored here like iso-transl-ctl-x-8-map
                     (keymapp (which-key--safe-lookup-key
